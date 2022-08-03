@@ -1,0 +1,425 @@
+---
+title: "Integrative_NMF"
+output: html_document
+date: '2022-06-29'
+---
+
+```{r setup, include=FALSE}
+reticulate::use_condaenv("tensorflowenv2", required = TRUE)
+library(knitr)
+library(circlize)
+library(tidyverse)
+library(ComplexHeatmap)
+library(viridis)
+library(BiocStyle)
+library(ButchR)
+library(limma)
+library(ggplot2)
+library(riverplot)
+library(ramify)
+library(ggpubr)
+```
+
+# Loading data
+Prepare NMF input: loading, normalization.
+
+```{r}
+set.seed(4563)
+
+cell_names_filtered = c("GM12878", "HepG2", "IMR90")
+cell_names_imputed = c('A549', 'HMEC', 'HUVEC', 'NHEK')
+
+features <- c('H2AFZ', 'H3K27ac', 'H3K27me3', 'H3K36me3', 
+              'H3K4me1', 'H3K4me2', 'H3K4me3', 'H3K79me2', 
+              'H3K9ac', 'H3K9me3', 'H4K20me1')
+
+paths1 <- lapply(cell_names_filtered, function(name){
+  paste0("/media/ag-cherrmann/echernova/model_input/", name, "/positives_", name, "_filtered.csv")
+})
+
+paths2 <- lapply(cell_names_imputed, function(name){
+  paste0("/media/ag-cherrmann/echernova/model_input/", name, "/positives_", name, "_imputed.csv")
+})
+
+paths <- append(paths1, paths2)
+
+load_data <- function(path){
+  
+  data = read.csv(path)
+  
+  # Only get the central windows
+  data = cbind(data[2:5], data[,grep('_0', names(data))])
+  
+  # Rename columns to be shorter
+  new_names <- lapply(names(data[5:length(names(data))]), function(n){
+    return(strsplit(n, '_')[[1]][2])
+  })
+  names(data) <- c(names(data[1:4]), new_names)
+  
+  # Return the input matrix for NMF
+  matrix_V = data.matrix(data[5:length(names(data))])
+  
+  # Only keep the columns that correspond to the features vector
+  # cell_name <- strsplit(new_names[[1]], '_')[[1]][1]
+  # keep_cols <- lapply(features, function(n){
+  #   return(paste0(cell_name, '_', n))
+  # })
+  matrix_V <- matrix_V[, features]
+  
+  # Delete NA
+  matrix_V <- na.omit(matrix_V)
+  
+  # Normalize matrix
+  matrix_V_norm <- normalizeQuantiles(matrix_V)
+  
+  return(matrix_V_norm)
+}
+
+matrices_V <- lapply(paths, load_data)
+names(matrices_V)<-c(cell_names_filtered, cell_names_imputed)
+```
+
+```{r}
+# Load TAD boundary conservation data
+paths1_consv <- lapply(cell_names_filtered, function(name){
+  paste0("/media/ag-cherrmann/echernova/tad_bound_conservation_10_40kb/", name, "_tad_bound_conservation_filtered.csv")
+})
+
+paths2_consv <- lapply(cell_names_imputed, function(name){
+  paste0("/media/ag-cherrmann/echernova/tad_bound_conservation_10_40kb/", name, "_tad_bound_conservation_imputed.csv")
+})
+
+paths_consv <- append(paths1_consv, paths2_consv)
+
+consv_list <- lapply(paths_consv, function(path){
+  consv = read.csv(path)
+  return(consv)
+})
+names(consv_list) <- c(cell_names_filtered, cell_names_imputed)
+```
+
+
+```{r}
+# Load CTCF buinding score annotation
+paths1_ctcf <- lapply(cell_names_filtered, function(name){
+  paste0("/media/ag-cherrmann/echernova/CTCF_anno/", name, "_CTCF_filtered.csv")
+})
+# From imputed: only available for A549
+paths2_ctcf <- "/media/ag-cherrmann/echernova/CTCF_anno/A549_CTCF_imputed.csv"
+
+paths_ctcf <- c(paths1_ctcf, paths2_ctcf)
+CTCF_anno <- lapply(paths_ctcf, function(path){
+  return(read.csv(path, header = TRUE))
+})
+names(CTCF_anno) <- c(cell_names_filtered, "A549")
+```
+
+
+```{r}
+# Load CTCF binary binding score annotation
+paths1_ctcf <- lapply(cell_names_filtered, function(name){
+  paste0("/media/ag-cherrmann/echernova/CTCF_anno/", name, "_CTCF_binary_filtered.csv")
+})
+# From imputed: only available for A549
+paths2_ctcf <- "/media/ag-cherrmann/echernova/CTCF_anno/A549_CTCF_binary_imputed.csv"
+
+paths_ctcf <- c(paths1_ctcf, paths2_ctcf)
+CTCF_anno_bin <- lapply(paths_ctcf, function(path){
+  return(read.csv(path, header = TRUE))
+})
+names(CTCF_anno_bin) <- c(cell_names_filtered, "A549")
+```
+
+
+# Perform integrative NMF
+Additionally normalize the W matrix.
+
+```{r}
+# Ranks 2 to 10
+k = 2:10
+
+int_nmf <- run_iNMF_tensor(matrices_V, 
+                           ranks = k,
+                           n_initializations = 10,
+                           iterations = 10^4,
+                           convergence_threshold = 40,
+                           extract_features = TRUE)
+```
+# Select optimal k
+```{r}
+gg_plotKStats(int_nmf)
+```
+
+#-------------------------------------------------------------------------------
+# K = 3
+
+```{r}
+k=3
+```
+
+# Common H matrix
+```{r}
+common_h_mat <- int_nmf@HMatrix$k3
+colnames(common_h_mat) <- int_nmf@input_data$colnames
+rownames(common_h_mat) <- c('S_1', 'S_2', 'S_3')
+h_heatmap <- Heatmap(common_h_mat,
+                     col = viridis(100),
+                     name = "Exposure",
+                     clustering_distance_columns = 'pearson',
+                     show_column_dend = TRUE,
+                     show_column_names = TRUE,
+                     show_row_names = TRUE,
+                     cluster_rows = FALSE,
+                     column_title = 'Common H matrix')
+print(h_heatmap)
+```
+
+
+# Print individual H matrices
+
+```{r}
+list_of_h_mat <- int_nmf@HMatrix_vs$k3
+lapply(names(list_of_h_mat), function(cell_name){
+  
+  # From named list to a matrix
+  h_mat_ind <- list_of_h_mat[cell_name]
+  names(h_mat_ind) <- c()
+  
+  #Print heatmap
+  h_heatmap <- Heatmap(h_mat_ind[[1]],
+                     col = viridis(100),
+                     name = "Exposure",
+                     clustering_distance_columns = 'pearson',
+                     show_column_dend = TRUE,
+                     show_column_names = TRUE,
+                     show_row_names = FALSE,
+                     cluster_rows = FALSE,
+                     column_title = paste('H matrix: ', cell_name))
+})
+```
+# Attribute each TAD boundary to one signature
+```{r}
+signatures_l <- lapply(names(list_of_h_mat), function(cell_name){
+  data_matrixW <- int_nmf@WMatrix_vs$k3[cell_name]
+  
+  # From named list to a matrix
+  names(data_matrixW) <- c()
+  data_matrixW <- data.frame(data_matrixW[[1]])
+  
+  # Attribute maximal value to
+  max_cols <- argmax(data_matrixW)
+  for (row in 1:nrow(data_matrixW)){
+    data_matrixW[row,] = 0
+    data_matrixW[row, max_cols[row]] = 1
+  }
+  
+  sums <- colSums(data_matrixW)
+  #rownames(sums) <- c(cell_name)
+  return(sums)
+})
+signatures <- Reduce(function(d1, d2) rbind(d1, d2), signatures_l)
+colnames(signatures) <- c('S1', 'S2', 'S3')
+
+# Calculate ratios
+signatures <- signatures /rowSums(signatures)
+
+# Melt for plotting
+signatures_m <- melt(signatures)
+
+plot <- ggplot(signatures_m, aes(x=Var2, y=value))+geom_boxplot()
+print(plot)
+
+# Mean ratios
+for (n in colnames(signatures)){
+  print(paste0('Mean of ', n, ': ', mean(signatures[,n])))
+}
+```
+
+
+# Print W matrices
+
+Conservation scores:
+
+```{r}
+lapply(names(list_of_h_mat), function(cell_name){
+  data_matrixW <- int_nmf@WMatrix_vs$k3[cell_name]
+  
+  # From named list to a matrix
+  names(data_matrixW) <- c()
+  data_matrixW <- data_matrixW[[1]]
+  
+  # Normalize the matrix
+  data_matrixW <- data_matrixW/matrixStats::rowMaxs(data_matrixW)
+  
+  colnames(data_matrixW) <- paste0("Sign.", 1:k)
+  f1 = circlize::colorRamp2(seq(min(data_matrixW), max(data_matrixW), length = 4), c("#EEEEEE", "#FFD700", "#FF0000", "#8b0000"))
+  
+  # Annotation: conservation
+  ann = unlist(consv_list[cell_name][[1]]['conservation'])
+  col_ann = circlize::colorRamp2(seq(0, max(ann), length = 6), c('#ff0000', '#ffff00', '#66ff33', '#3399ff', '#6e34eb', '#b734eb'))
+  row_ha = rowAnnotation(conservation = ann, col=list(conservation=col_ann))
+  
+  w_heatmap <- Heatmap(data_matrixW,
+                       col = f1,
+                       name = paste("W matrix: ", cell_name),
+                       clustering_distance_columns = 'pearson',
+                       show_column_dend = TRUE,
+                       show_column_names = TRUE,
+                       show_row_names = FALSE,
+                       cluster_rows = TRUE,
+                       cluster_columns = FALSE,
+                       left_annotation = row_ha)
+  w_heatmap = draw(w_heatmap)
+})
+```
+
+CTCF binding scores:
+```{r}
+lapply(names(CTCF_anno), function(cell_name){
+  data_matrixW <- int_nmf@WMatrix_vs$k3[cell_name]
+  
+  # From named list to a matrix
+  names(data_matrixW) <- c()
+  data_matrixW <- data_matrixW[[1]]
+  
+  # Normalize the matrix
+  data_matrixW <- data_matrixW/matrixStats::rowMaxs(data_matrixW)
+  
+  colnames(data_matrixW) <- paste0("Sign.", 1:k)
+  f1 = circlize::colorRamp2(seq(min(data_matrixW), max(data_matrixW), length = 4), c("#EEEEEE", "#FFD700", "#FF0000", "#8b0000"))
+  
+  # Annotation: conservation
+  ann = unlist(CTCF_anno[cell_name][[1]]['CTCF'])
+  col_ann = circlize::colorRamp2(seq(0, max(ann), length = 6), c('#ff0000', '#ffff00', '#66ff33', '#3399ff', '#6e34eb', '#b734eb'))
+  row_ha = rowAnnotation(CTCF_binding_score = ann, col=list(CTCF_binding_score=col_ann))
+  
+  w_heatmap <- Heatmap(data_matrixW,
+                       col = f1,
+                       name = paste("W matrix: ", cell_name),
+                       clustering_distance_columns = 'pearson',
+                       show_column_dend = TRUE,
+                       show_column_names = TRUE,
+                       show_row_names = FALSE,
+                       cluster_rows = TRUE,
+                       cluster_columns = FALSE,
+                       left_annotation = row_ha)
+  w_heatmap = draw(w_heatmap)
+})
+```
+
+
+#Attribute every TAD boundary to one signature and boxplot
+
+Conservation
+```{r}
+lapply(names(list_of_h_mat), function(cell_name){
+  data_matrixW <- int_nmf@WMatrix_vs$k3[cell_name][[1]]
+  
+  # Attribute maximal value to
+  max_cols <- argmax(data_matrixW)
+  for (row in 1:nrow(data_matrixW)){
+    data_matrixW[row,] = 0
+    data_matrixW[row, max_cols[row]] = 1
+  }
+
+  colnames(data_matrixW) <- paste0("Sign.", 1:k)
+
+  # Add annotation
+  ann = unlist(consv_list[cell_name][[1]]['conservation'])
+  names(ann) <- c(1:length(ann))
+  df = data.frame(signature=factor(max_cols), conservation=ann)
+  
+  # Boxplots
+  plot <- ggplot(df, aes(x=signature, y=conservation))+
+    geom_boxplot()+
+    ggtitle(paste0('Distribution of TAD boundaries: ', cell_name))+
+    theme(plot.title = element_text(hjust = 0.5))
+  print(plot)
+})
+```
+
+```{r}
+#complete_df = data.frame(signature=factor(), CTCF_binding_score=numeric(), cell=character())
+complete_df <- lapply(names(CTCF_anno)[1:3], function(cell_name){
+  data_matrixW <- int_nmf@WMatrix_vs$k3[cell_name][[1]]
+  
+  # Attribute maximal value to
+  max_cols <- argmax(data_matrixW)
+  for (row in 1:nrow(data_matrixW)){
+    data_matrixW[row,] = 0
+    data_matrixW[row, max_cols[row]] = 1
+  }
+
+  colnames(data_matrixW) <- paste0("Sign.", 1:k)
+
+  # Add annotation
+  ann = unlist(CTCF_anno[cell_name][[1]]['CTCF'])
+  names(ann) <- c(1:length(ann))
+  df = data.frame(signature=factor(max_cols), CTCF_binding_score=ann)
+  # Add data to common df
+  df$cell = cell_name
+  complete_df <- rbind(complete_df, df)
+  
+  # Student's t-test
+  comparisons = compare_means(CTCF_binding_score ~ signature,  data = df, method='t.test')
+  print(comparisons)
+  
+  return(df)
+  
+})
+
+complete_df <- Reduce(function(d1, d2) rbind(d1, d2), complete_df)
+complete_df$cell <- factor(complete_df$cell)
+# Boxplots
+plot <- ggplot(complete_df, aes(x=signature, y=CTCF_binding_score))+
+        geom_violin() +
+        geom_boxplot(width=0.1)+
+        facet_wrap(~cell, ncol=3)+
+        ggtitle('Distributions of the CTCF binding score')+
+        theme(plot.title = element_text(hjust = 0.5))
+png(file="/media/ag-cherrmann/echernova/figures/CTCF_distribution.png", width=550, height=300)
+print(plot)
+dev.off()
+```
+Binary CTCF
+```{r}
+lapply(names(CTCF_anno_bin), function(cell_name){
+  data_matrixW <- int_nmf@WMatrix_vs$k3[cell_name][[1]]
+  
+  # Attribute maximal value to
+  max_cols <- argmax(data_matrixW)
+  for (row in 1:nrow(data_matrixW)){
+    data_matrixW[row,] = 0
+    data_matrixW[row, max_cols[row]] = 1
+  }
+
+  colnames(data_matrixW) <- paste0("Sign.", 1:3)
+
+  # Add annotation
+  ann = unlist(CTCF_anno_bin[cell_name][[1]]['CTCF'])
+  names(ann) <- c(1:length(ann))
+  df = data.frame(signature=factor(max_cols), CTCF_binding_score=ann)
+  
+  # Boxplots
+  plot <- ggplot(df)+
+    aes(x=signature, fill=factor(CTCF_binding_score)) +
+    geom_bar(position='fill')+
+    ggtitle(paste0('Distribution of TAD boundaries: ', cell_name))+
+    theme(plot.title = element_text(hjust = 0.5))
+  print(plot)
+})
+```
+
+# Save the data
+```{r}
+folder_path = "/media/ag-cherrmann/echernova/integrative_nmf/"
+save(int_nmf, file=paste0(folder_path, '220701_iNMF-object.RData'))
+h_matrix <- int_nmf@HMatrix$k3 
+colnames(h_matrix) <- int_nmf@input_data$colnames
+write.csv(h_matrix, paste0(folder_path, '220701_common-H-matrix.csv'))
+```
+
+
+
+
+

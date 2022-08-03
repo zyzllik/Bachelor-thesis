@@ -1,0 +1,266 @@
+---
+title: "Signature_correlation_imputed"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+reticulate::use_condaenv("tensorflowenv2", required = TRUE)
+library(knitr)
+library(circlize)
+library(tidyverse)
+library(ComplexHeatmap)
+library(viridis)
+library(BiocStyle)
+library(ButchR)
+library(limma)
+library(ggplot2)
+library(riverplot)
+library(ramify)
+library(ggpubr)
+```
+
+# Loading data
+Prepare NMF input: loading, normalization.
+
+```{r}
+set.seed(4563)
+
+cell_names = c("A549", "GM12878", "HepG2", "HMEC", 
+             "HUVEC", "IMR90", "K562", "NHEK")
+
+load_data <- function(name){
+  
+  path = paste0("/media/ag-cherrmann/echernova/model_input/", name, "/positives_", name, "_imputed.csv")
+  data = read.csv(path)
+  
+  # Only get the central windows
+  data = cbind(data[2:5], data[,grep('_0', names(data))])
+  
+  # Rename columns to be shorter
+  new_names <- lapply(names(data[5:length(names(data))]), function(n){
+    return(paste(strsplit(n, '_')[[1]][1:2], collapse = '_'))
+  })
+  names(data) <- c(names(data[1:4]), new_names)
+  
+  # Return the input matrix for NMF
+  matrix_V = data.matrix(data[5:length(names(data))])
+
+  matrix_V = drop_na(as.data.frame(matrix_V))
+  
+  # Normalize matrix
+  matrix_V_norm <- normalizeQuantiles(matrix_V)
+  
+  return(matrix_V_norm)
+}
+
+matrices_V <- lapply(cell_names, load_data)
+
+# Load TAD boundary conservation
+consv_list <- lapply(cell_names, function(name){
+  path_consv = paste0("/media/ag-cherrmann/echernova/tad_bound_conservation_10_40kb/", name, "_tad_bound_conservation_imputed.csv")
+  consv = read.csv(path_consv)
+})
+```
+
+# Perform NMF
+Additionally normalize the W matrix.
+
+```{r}
+# Ranks 2 to 10
+k = 2:10
+
+all_nmf <- lapply(matrices_V, function(mat){
+  
+  # Correct if k is bigger than number of columns in matrix V
+  if (max(k) > ncol(mat)){
+    test_k = 2:(ncol(mat)-1)
+  }else{
+    test_k = k
+  }
+  
+  data_nmf <- run_NMF_tensor(X = mat, 
+                             ranks = test_k,
+                             method = 'NMF',
+                             n_initializations = 10,
+                             extract_features = TRUE)
+   # Normalize W matrix
+  data_nmf <- normalizeW(data_nmf)
+  
+  return(data_nmf)
+})
+```
+
+```{r}
+lapply(all_nmf, function(sample_nmf){
+  sample_name = strsplit(sample_nmf@input_matrix$colnames[1], '_')[[1]][1]
+  print(sample_name)
+  gg_plotKStats(sample_nmf)
+  
+})
+```
+Best k values:
+- A549: 3, 6, 8
+- GM12878: 7
+- HepG2: 6
+- HMEC: 3, 7
+- HUVEC: 3, 6
+- IMR90: 6 
+- K562: 7
+- NHEK: 3, 6
+
+#-------------------------------------------------------------------------------
+# K = 4
+As in the non imputed data
+
+```{r}
+k=4
+```
+
+
+# Print H matrices
+
+```{r}
+lapply(all_nmf, function(data_nmf){
+  tmp_hmatrix <- HMatrix(data_nmf, k)
+  cell_name <- strsplit(data_nmf@input_matrix$colnames[1], '_')[[1]][1]
+  h_heatmap <- Heatmap(tmp_hmatrix,
+                     col = viridis(100),
+                     name = "Exposure",
+                     clustering_distance_columns = 'pearson',
+                     show_column_dend = TRUE,
+                     show_column_names = TRUE,
+                     show_row_names = FALSE,
+                     cluster_rows = FALSE,
+                     column_title = paste0('H matrix: ', cell_name, ', imputed'))
+  # print(h_heatmap)
+})
+```
+# Print W matrices
+
+```{r}
+for (i in c(1:length(all_nmf))){
+  data_nmf = all_nmf[[i]]
+  data_matrixW <- WMatrix(data_nmf, k)
+  
+  # Normalize the matrix
+  data_matrixW <- data_matrixW/matrixStats::rowMaxs(data_matrixW)
+  
+  cell_name <- strsplit(data_nmf@input_matrix$colnames[1], '_')[[1]][1]
+  colnames(data_matrixW) <- paste0("Sign.", 1:k)
+  f1 = circlize::colorRamp2(seq(min(data_matrixW), max(data_matrixW), length = 4), c("#EEEEEE", "#FFD700", "#FF0000", "#8b0000"))
+  
+  # Add annotation
+  ann = unlist(consv_list[[i]]['conservation'])
+  col_ann = circlize::colorRamp2(seq(0, max(ann), length = 6), c('#ff0000', '#ffff00', '#66ff33', '#3399ff', '#6e34eb', '#b734eb'))
+  row_ha = rowAnnotation(conservation = ann, col=list(conservation=col_ann))
+  
+  w_heatmap <- Heatmap(data_matrixW,
+                       col = f1,
+                       name = paste0("W matrix: ", cell_name, ', imputed'),
+                       clustering_distance_columns = 'pearson',
+                       show_column_dend = TRUE,
+                       show_column_names = TRUE,
+                       show_row_names = FALSE,
+                       cluster_rows = TRUE,
+                       cluster_columns = FALSE,
+                       left_annotation = row_ha)
+  w_heatmap = draw(w_heatmap)
+}
+```
+#Attribute every TAD boundary to one signature
+```{r}
+complete_df = data.frame(signature=factor(), conservation=numeric(), cell=character())
+for (i in c(1:length(all_nmf))){
+  data_nmf = all_nmf[[i]]
+  data_matrixW <- WMatrix(data_nmf, k)
+  
+  # Attribute maximal value to
+  max_cols <- argmax(data_matrixW)
+  for (row in 1:nrow(data_matrixW)){
+    data_matrixW[row,] = 0
+    data_matrixW[row, max_cols[row]] = 1
+  }
+  
+  cell_name <- strsplit(data_nmf@input_matrix$colnames[1], '_')[[1]][1]
+  colnames(data_matrixW) <- paste0("Sign.", 1:k)
+
+  # Add annotation
+  ann = unlist(consv_list[[i]]['conservation'])
+  names(ann) <- c(1:length(ann))
+  df = data.frame(signature=factor(max_cols), conservation=ann)
+  df$cell = cell_name
+  complete_df <- rbind(complete_df, df)
+  
+  #T-test
+  comparisons = compare_means(conservation ~ signature,  data = df, method='t.test')
+  print(comparisons)
+  # Boxplots
+  #plot <- ggplot(df, aes(x=signature, y=conservation))+
+  #        geom_violin() +
+  #        geom_boxplot(width=0.1)
+
+  #print(plot)
+}
+
+plot <- ggplot(complete_df, aes(x=signature, y=conservation))+
+        geom_violin() +
+        geom_boxplot(width=0.1)+
+        facet_wrap(~cell, ncol=4)+
+        ggtitle('Distributions of conservation scores for different signatures')+
+        theme(plot.title = element_text(hjust = 0.5))
+png(file="/media/ag-cherrmann/echernova/figures/conservation_distribution.png", width=550, height=300)
+print(plot)
+dev.off()
+```
+
+# Pairwise correlation of the signatures
+Pearson correlation used.
+
+Prepare the matrix containing all signatures:
+
+```{r}
+h_mat_list <- lapply(all_nmf, function(data_nmf){
+  
+  # get H matrix
+  h_mat <- HMatrix(data_nmf, k)
+  h_mat <- data.frame(h_mat)
+  
+  # Add names to the rows (S#_CellName)
+  row_names <- list()
+  for (i in c(1:k)){
+    cell_name <- strsplit(data_nmf@input_matrix$colnames[1], '_')[[1]][1]
+    row_names <- append(row_names, paste0('S', i, '_', cell_name))
+  }
+  rownames(h_mat) <- row_names
+  
+  # Change column names so that they are the same for all cell lines
+  col_names <- lapply(names(h_mat), function(n){
+    new_n <- strsplit(n, '_')[[1]][2]
+    return(new_n)
+  })
+  names(h_mat) <- col_names
+  return(h_mat)
+})
+
+# Combine all H matrices in one matrix
+all_h_mat <- Reduce(function(d1, d2) rbind(d1, d2), h_mat_list)
+
+# Transpose => columns are signatures, rows are features
+all_h_mat <- t(all_h_mat)
+```
+
+Calculate Pearson correlation:
+```{r}
+cor_matrix <- cor(all_h_mat, method = 'pearson')
+# Plot the heatmap
+heat <- Heatmap(cor_matrix, name="Pearson corr.", width =unit(120, "mm"), 
+                height=unit(120, "mm"),
+                column_title = 'Clustering of the NMF signatures by Pearson correlation')
+png(file="/media/ag-cherrmann/echernova/figures/signature_corr_imputed.png", width=550, height=500)
+print(heat)
+dev.off()
+```
+
+
+
+

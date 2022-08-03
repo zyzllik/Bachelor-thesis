@@ -1,0 +1,152 @@
+---
+title: "NMF_analysis_HepG2.Rmd"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+reticulate::use_condaenv("tensorflowenv2", required = TRUE)
+# library(knitr)
+library(circlize)
+library(ComplexHeatmap)
+library(viridis)
+library(tidyverse)
+library(BiocStyle)
+library(ButchR)
+library(limma)
+library(ggplot2)
+library(riverplot)
+```
+
+## K562 - all modifications
+
+### Data import
+
+```{r}
+path = "/media/ag-cherrmann/echernova/model_input/HepG2/positives_HepG2_CTCF-from-ChIP.csv"
+cell_name = "HepG2"
+set.seed(6575)
+
+data = read.csv(path)
+data = cbind(data[2:5], data[,grep('_0', names(data))]) # only the windows on the TAD boundary
+new_names <- lapply(names(data[5:length(names(data))]), function(n){
+  return(strsplit(n, '_')[[1]][2])
+})
+# new_names[[13]] <- 'CTCF'
+names(data) <- c(names(data[1:4]), new_names)
+
+matrix_V = data.matrix(data[5:length(names(data))])
+
+k_min <- 2
+k_max <- 10
+```
+
+### Data distribution
+
+```{r}
+long_data <- data[5:length(names(data))] %>% gather()
+long_data$value <- as.numeric(long_data$value)
+long_data <- na.omit(long_data)
+ggplot(gather(long_data), aes(value)) + 
+    geom_histogram(bins = 50) + 
+    facet_wrap(~key)
+```
+### Data normalisation
+```{r}
+matrix_V_norm <- normalizeQuantiles(matrix_V)
+
+long_data_norm <- data.frame(matrix_V_norm) %>% gather()
+long_data_norm$value <- as.numeric(long_data_norm$value)
+long_data_norm <- na.omit(long_data_norm)
+ggplot(gather(long_data_norm), aes(value)) + 
+    geom_histogram(bins = 50) + 
+    facet_wrap(~key)
+```
+
+
+### NMF
+
+```{r}
+data_nmf <- run_NMF_tensor(X = matrix_V_norm, 
+                           ranks = k_min:k_max,
+                           method = 'NMF',
+                           n_initializations = 10,
+                           extract_features = TRUE)
+```
+### Optimal k
+
+```{r}
+gg_plotKStats(data_nmf)
+```
+Optimal k + k that was optimal for the other cell lines:
+
+```{r}
+ks = c(4, 8)
+```
+### H matrix
+
+```{r}
+for (ki in ks){
+  tmp_hmatrix <- HMatrix(data_nmf, k = ki)
+  h_heatmap <- Heatmap(tmp_hmatrix,
+                     col = viridis(100),
+                     name = "Exposure",
+                     clustering_distance_columns = 'pearson',
+                     show_column_dend = TRUE,
+                     show_column_names = TRUE,
+                     show_row_names = FALSE,
+                     cluster_rows = FALSE,
+                     column_title = paste('H matrix; k =', as.character(ki), '; ', cell_name))
+  print(h_heatmap)
+}
+```
+
+Segmentation for k = 7 looks better:
+```{r}
+k_opt = 8
+```
+
+### Normalize W matrix
+```{r}
+data_nmf_norm <- normalizeW(data_nmf)
+```
+
+### Feature selection
+
+Signature specific features
+
+```{r}
+data_features <- SignatureSpecificFeatures(data_nmf_norm,
+                                           k = k_opt, 
+                                           return_all_features = TRUE)
+colnames(data_features) <- paste0("Sign.", 1:k_opt)
+head(data_features)
+```
+
+### Matrix W
+```{r}
+# Display selected features on W matrix
+data_matrixW <- WMatrix(data_nmf_norm, k=k_opt)
+# data_matrixW <- data_matrixW/rowSums(data_matrixW)
+colnames(data_matrixW) <- paste0("Sign.", 1:k_opt)
+f1 = circlize::colorRamp2(seq(min(data_matrixW), max(data_matrixW), length = 4), c("#EEEEEE", "#FFD700", "#FF0000", "#8b0000"))
+w_heatmap <- Heatmap(data_matrixW,
+                     col = f1,
+                     name = "W matrix",
+                     clustering_distance_columns = 'pearson',
+                     show_column_dend = TRUE,
+                     show_column_names = TRUE,
+                     show_row_names = FALSE,
+                     cluster_rows = TRUE,
+                     cluster_columns = FALSE)
+print(w_heatmap)
+```
+
+### Riverplot
+
+```{r}
+riverplot_obj <- generateRiverplot(data_nmf_norm)
+d <- list(srt=0, textcex=0.7)
+# png(file="/media/ag-cherrmann/echernova/figures/0517_riverplot_NMF_K562.png")
+plot(riverplot_obj, plot_area = 0.9, yscale = 0.7, nodewidth = 0.7, default_style=d)
+# dev.off()
+```
