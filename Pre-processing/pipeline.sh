@@ -1,28 +1,20 @@
 #!/bin/bash
 
-directory="/net/data.isilon/ag-cherrmann/projects/06_HIV_Microglia/data/tads/hg38/bed/"
-# tad_input_files=(
-#     'A549_raw-merged_TADs.txt.bed'
-#     'GM12878_Rao_2014-raw_TADs.txt.bed'
-#     'HepG2.ENCODE3-raw_modified.bed'
-#     'HMEC_Rao_2014-raw_TADs.txt.bed'
-#     'HUVEC_Rao_2014-raw_TADs.txt.bed'
-#     'IMR90_Rao_2014-raw_TADs.txt.bed'
-#     'K562_Rao_2014-raw_TADs.txt.bed'
-#     'NHEK_Rao_2014-raw_TADs.txt.bed'
-# )
+tad_directory="./"
 
-# samples=(
-#     "A549"
-#     "GM12878"
-#     "HepG2"
-#     "HMEC"
-#     "HUVEC"
-#     "IMR90"
-#     "K562"
-#     "NHEK"
-# )
+suffix='_filtered'
+
+tad_boundary_folder='./'
+
 tad_input_files=(
+    'A549_raw-merged_TADs.txt.bed'
+    'GM12878_Rao_2014-raw_TADs.txt.bed'
+    'HepG2.ENCODE3-raw_modified.bed'
+    'HMEC_Rao_2014-raw_TADs.txt.bed'
+    'HUVEC_Rao_2014-raw_TADs.txt.bed'
+    'IMR90_Rao_2014-raw_TADs.txt.bed'
+    'K562_Rao_2014-raw_TADs.txt.bed'
+    'NHEK_Rao_2014-raw_TADs.txt.bed'
     'H1-NPC_Dixon_2015-raw_TADs.txt.bed'
     'Adrenal_Schmitt2016-raw_TADs.txt.bed'
     'H1-TRO_Dixon_2015-raw_TADs.txt.bed'
@@ -58,6 +50,14 @@ tad_input_files=(
 )
 
 samples=(
+    "A549"
+    "GM12878"
+    "HepG2"
+    "HMEC"
+    "HUVEC"
+    "IMR90"
+    "K562"
+    "NHEK"
     'H1-NPC'
     'Adrenal'
     'H1-TRO'
@@ -92,10 +92,6 @@ samples=(
     'NCIH460'
 )
 
-suffix='_filtered'
-
-
-# !!!! 01 Changed (imputed bigwig files)
 
 # Activate the right conda enviroment
 source ~/miniconda3/bin/activate
@@ -106,7 +102,7 @@ n_samples=${#samples[@]}
 for ((i=0; i<$n_samples; i++))
 do
     sample=${samples[$i]}
-    tad_file="$directory${tad_input_files[$i]}"
+    tad_file="${tad_directory}${tad_input_files[$i]}"
 
     echo "------------ Processing sample: $sample ------------"
 
@@ -118,27 +114,27 @@ do
     # Number of TAD boundaries is saved in n_tads
     echo "Extract TAD boundaries from the TAD file"
     echo $tad_file
-    n_tads=`python /net/data.isilon/ag-cherrmann/echernova/src/tadboundaries_from_tad_filter.py $tad_file $sample $suffix`
+    n_tads=`python ./src/tadboundaries_from_tad_filter.py $tad_file $sample $suffix`
     echo "Number of TAD boundaries detected: $n_tads"
 
-    # ### Get binned features in the defined windows ###
-    # echo "Binning features"
-    # path_TAD_boundaries="/net/data.isilon/ag-cherrmann/echernova/tad_boundaries_10_40kb/${sample}_TAD_boundaries_10_40kb${suffix}.txt.bed"
-    # sh /net/data.isilon/ag-cherrmann/echernova/src/01-definingwindows.sh $sample $path_TAD_boundaries $suffix
+    ### Get binned features in the defined windows ###
+    echo "Binning features"
+    path_TAD_boundaries="${tad_boundary_folder}/${sample}_TAD_boundaries_10_40kb${suffix}.txt.bed"
+    sh ./src/01-definingwindows.sh $sample $path_TAD_boundaries $suffix
     
-    # echo "## Negatives ##"
+    echo "## Negatives ##"
 
-    # ### Generate central windows for negative samples ###
-    # echo "Generating synthetic negative central TAD boundary windows"
-    # sh /net/data.isilon/ag-cherrmann/echernova/src/n01_get_central.sh $n_tads $sample $suffix
+    ### Generate central windows for negative samples ###
+    echo "Generating synthetic negative central TAD boundary windows"
+    sh ./src/n01_get_central.sh $n_tads $sample $suffix
 
-    # ### Get neighbouring windows for the negative samples ###
-    # echo "Calculating neigbouring windows"
-    # python /net/data.isilon/ag-cherrmann/echernova/src/get_windows_negative.py $sample $suffix
+    ### Get neighbouring windows for the negative samples ###
+    echo "Calculating neigbouring windows"
+    python ./src/get_windows_negative.py $sample $suffix
 
-    # ### Get binned features in the negative windows
-    # echo "Binning features"
-    # path_to_neg="/net/data.isilon/ag-cherrmann/echernova/tad_boundaries_10_40kb/${sample}_negatives_10_40kb${suffix}.txt.bed"
-    # sh /net/data.isilon/ag-cherrmann/echernova/src/01-definingwindows.sh $sample $path_to_neg "${suffix}_neg"
+    ### Get binned features in the negative windows
+    echo "Binning features"
+    path_to_neg="${tad_boundary_folder}/${sample}_negatives_10_40kb${suffix}.txt.bed"
+    sh ./src/01-definingwindows.sh $sample $path_to_neg "${suffix}_neg"
 
 done
